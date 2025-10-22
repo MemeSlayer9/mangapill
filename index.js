@@ -2,6 +2,7 @@ const express = require('express');
 const axios = require('axios');
 const cheerio = require('cheerio');
 const { request, gql } = require('graphql-request');
+const cors = require('cors');
 
 const app = express();
 const PORT = 3000;
@@ -548,6 +549,15 @@ app.get('/mangafire-info', async (req, res) => {
   }
 });
 
+app.use(express.json());
+
+
+app.use(cors({
+  origin: ['http://localhost:3001', 'http://localhost:3000'], // Add your frontend URL
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE'],
+  allowedHeaders: ['Content-Type']
+}));
 // Start server
 app.listen(PORT, () => {
   console.log(`🚀 Manga scraper running on http://localhost:${PORT}`);
