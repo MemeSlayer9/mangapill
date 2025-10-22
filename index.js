@@ -308,7 +308,7 @@ app.get('/', (req, res) => {
     endpoints: [
       {
         method: 'GET',
-        path: '/scrape',
+        path: '/featured-mangas',
         description: 'Scrape featured manga from MangaPill homepage'
       },
       {
@@ -325,7 +325,7 @@ app.get('/', (req, res) => {
       },
       {
         method: 'GET',
-        path: '/chapters',
+        path: '/recent-chapters',
         description: 'Scrape latest chapters from MangaPill chapters page'
       },
       {
@@ -344,7 +344,7 @@ app.get('/', (req, res) => {
 });
 
 // MangaPill endpoints
-app.get('/scrape', async (req, res) => {
+app.get('/featured-mangas', async (req, res) => {
   try {
     const { data } = await axios.get('https://mangapill.com/', {
       headers: {
@@ -431,7 +431,7 @@ app.get('/manga-details', async (req, res) => {
   }
 });
 
-app.get('/chapters', async (req, res) => {
+app.get('/recent-chapters', async (req, res) => {
   try {
     const { data } = await axios.get('https://mangapill.com/chapters', {
       headers: {
@@ -531,10 +531,10 @@ app.get('/mangafire-info', async (req, res) => {
 // Start server
 app.listen(PORT, () => {
   console.log(`🚀 Manga scraper running on http://localhost:${PORT}`);
-  console.log(`📋 Scrape featured manga: http://localhost:${PORT}/scrape`);
+  console.log(`📋 Scrape featured manga: http://localhost:${PORT}/featured-mangas`);
   console.log(`🔗 Scrape custom URL: http://localhost:${PORT}/scrape-url?url=YOUR_URL`);
   console.log(`📖 Scrape manga details: http://localhost:${PORT}/manga-details?url=YOUR_URL`);
-  console.log(`📚 Scrape latest chapters: http://localhost:${PORT}/chapters`);
+  console.log(`📚 Scrape latest chapters: http://localhost:${PORT}/recent-chapters`);
   console.log(`🔥 Scrape trending mangas: http://localhost:${PORT}/trending-mangas`);
   console.log(`🔥 Scrape MangaFire info: http://localhost:${PORT}/mangafire-info?id=MANGA_ID`);
 });
