@@ -77,6 +77,10 @@ function scrapeMangaFromHTML(html) {
     const fullPath = $el.find('a[href^="/manga/"]').attr('href');
     const id = fullPath ? fullPath.replace('/manga/', '') : null;
     const mangaID = $el.find('a').first().attr('href');
+    
+    // Remove /chapters prefix from mangaID
+    const cleanMangaID = mangaID ? mangaID.replace('/chapters/', '') : null;
+    
     const chapterNumber = $el.find('.text-lg.font-black').text().trim();
     const mangaTitle = $el.find('.text-secondary').text().trim();
     const imageUrl = $el.find('img').attr('src') || $el.find('img').attr('data-src');
@@ -85,7 +89,7 @@ function scrapeMangaFromHTML(html) {
     mangaList.push({
       id,
       chapterNumber,
-      mangaID,
+      mangaID: cleanMangaID,
       mangaTitle,
       imageUrl,
       imageAlt
@@ -119,16 +123,25 @@ function scrapeChaptersPage(html) {
     const fullPath = mangaLink.attr('href');
     // Extract just the ID portion from /manga/6511/megami-no-caf-terrace
     const id = fullPath ? fullPath.replace('/manga/', '') : null;
-    const mangaTitle = $el.find('.text-secondary').first().text().trim();
+    
+    // Split manga title and alternative title
+    const mangaTitleRaw = $el.find('.text-secondary').first().text().trim();
+    const titleParts = mangaTitleRaw.split(/\n\s+/);
+    const mangaTitle = titleParts[0] || null;
+    const mangaTitle2 = titleParts[1] || null;
     
     const timeAgo = $el.find('time-ago').first().attr('datetime');
     
-    if (chapterNumber && mangaTitle && mangaID) {
+    // Remove /chapters/ prefix from mangaID
+    const cleanMangaID = mangaID ? mangaID.replace('/chapters/', '') : null;
+    
+    if (chapterNumber && mangaTitle && cleanMangaID) {
       chaptersList.push({
         id,
         chapterNumber,
-        mangaID,
+        mangaID: cleanMangaID,
         mangaTitle,
+        ...(mangaTitle2 && { mangaTitle2 }),
         imageUrl,
         imageAlt,
         publishedAt: timeAgo
