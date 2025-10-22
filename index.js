@@ -7,10 +7,28 @@ const cors = require('cors');
 const app = express();
 const PORT = 3000;
 
-// Middleware
+// ==================== MIDDLEWARE (MUST BE FIRST) ====================
+app.use(cors({
+  origin: ['http://localhost:3001', 'http://localhost:3000'],
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE'],
+  allowedHeaders: ['Content-Type']
+}));
+
 app.use(express.json());
 
 const ANILIST_API = 'https://graphql.anilist.co';
+
+// Headers for different sources
+const MANGAPILL_HEADERS = {
+  'Referer': 'https://mangapill.com/',
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+};
+
+const MANGAFIRE_HEADERS = {
+  'Referer': 'https://mangafire.to/',
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+};
 
 // GraphQL query to search manga on AniList
 const SEARCH_MANGA_QUERY = gql`
@@ -78,8 +96,6 @@ function scrapeMangaFromHTML(html) {
     const fullPath = $el.find('a[href^="/manga/"]').attr('href');
     const id = fullPath ? fullPath.replace('/manga/', '') : null;
     const mangaID = $el.find('a').first().attr('href');
-    
-    // Remove /chapters prefix from mangaID
     const cleanMangaID = mangaID ? mangaID.replace('/chapters/', '') : null;
     
     const chapterNumber = $el.find('.text-lg.font-black').text().trim();
@@ -122,18 +138,14 @@ function scrapeChaptersPage(html) {
     
     const mangaLink = $el.find('a[href^="/manga/"]').first();
     const fullPath = mangaLink.attr('href');
-    // Extract just the ID portion from /manga/6511/megami-no-caf-terrace
     const id = fullPath ? fullPath.replace('/manga/', '') : null;
     
-    // Split manga title and alternative title
     const mangaTitleRaw = $el.find('.text-secondary').first().text().trim();
     const titleParts = mangaTitleRaw.split(/\n\s+/);
     const mangaTitle = titleParts[0] || null;
     const mangaTitle2 = titleParts[1] || null;
     
     const timeAgo = $el.find('time-ago').first().attr('datetime');
-    
-    // Remove /chapters/ prefix from mangaID
     const cleanMangaID = mangaID ? mangaID.replace('/chapters/', '') : null;
     
     if (chapterNumber && mangaTitle && cleanMangaID) {
@@ -152,6 +164,7 @@ function scrapeChaptersPage(html) {
 
   return chaptersList;
 }
+
 function scrapeMangaDetails(html) {
   const $ = cheerio.load(html);
   
@@ -226,7 +239,6 @@ function scrapeTrendingMangas(html) {
       if (tagText) tags.push(tagText);
     });
     
-    // Extract ID by removing /manga/ prefix
     const id = mangaLink.replace('/manga/', '');
     
     if (title && mangaLink) {
@@ -271,7 +283,6 @@ function scrapeMangaFireInfo(html) {
   };
 
   try {
-    // Extract main manga info
     res.mangaInfo.title = $('h1[itemprop="name"]').text().trim() || null;
     res.mangaInfo.altTitles = $('h1[itemprop="name"]').siblings('h6').text().trim() || null;
     res.mangaInfo.poster = $('.poster img')?.attr('src')?.trim() || null;
@@ -282,13 +293,11 @@ function scrapeMangaFireInfo(html) {
     res.mangaInfo.published = $('.meta div:contains("Published:")').text().replace('Published:', '').trim() || null;
     res.mangaInfo.rating = $('.rating-box .live-score').text().trim() || null;
 
-    // Extract genres
     $('.meta div:contains("Genres:") a').each((i, el) => {
       const genre = $(el).text().trim();
       if (genre) res.mangaInfo.genres.push(genre);
     });
 
-    // Extract chapters
     $('#chapters-list a[href*="/read/"]').each((i, el) => {
       const chapterLink = $(el).attr('href');
       const chapterTitle = $(el).text().trim();
@@ -300,7 +309,6 @@ function scrapeMangaFireInfo(html) {
       }
     });
 
-    // Scrape similar manga from trending section
     $('section.side-manga.default-style div.original.card-sm.body a.unit').each((i, el) => {
       const manga = {
         id: $(el).attr('href')?.split('/').pop() || null,
@@ -362,13 +370,10 @@ app.get('/', (req, res) => {
   });
 });
 
-// MangaPill endpoints
 app.get('/featured-mangas', async (req, res) => {
   try {
     const { data } = await axios.get('https://mangapill.com/', {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-      }
+      headers: MANGAPILL_HEADERS
     });
 
     const mangaList = scrapeMangaFromHTML(data);
@@ -397,9 +402,7 @@ app.get('/scrape-url', async (req, res) => {
 
   try {
     const { data } = await axios.get(url, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-      }
+      headers: MANGAPILL_HEADERS
     });
 
     const mangaList = scrapeMangaFromHTML(data);
@@ -430,9 +433,7 @@ app.get('/manga-details', async (req, res) => {
   try {
     const url = `https://mangapill.com/manga/${id}`;
     const { data } = await axios.get(url, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-      }
+      headers: MANGAPILL_HEADERS
     });
 
     const mangaDetails = scrapeMangaDetails(data);
@@ -455,9 +456,7 @@ app.get('/manga-details', async (req, res) => {
 app.get('/recent-chapters', async (req, res) => {
   try {
     const { data } = await axios.get('https://mangapill.com/chapters', {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-      }
+      headers: MANGAPILL_HEADERS
     });
 
     const chaptersList = scrapeChaptersPage(data);
@@ -477,9 +476,7 @@ app.get('/recent-chapters', async (req, res) => {
 app.get('/trending-mangas', async (req, res) => {
   try {
     const { data } = await axios.get('https://mangapill.com/', {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-      }
+      headers: MANGAPILL_HEADERS
     });
 
     const trendingList = scrapeTrendingMangas(data);
@@ -496,20 +493,6 @@ app.get('/trending-mangas', async (req, res) => {
   }
 });
 
-// Search manga on AniList
-async function searchManga(mangaTitle) {
-  try {
-    const data = await request(ANILIST_API, SEARCH_MANGA_QUERY, { 
-      search: mangaTitle 
-    });
-    return data.Media;
-  } catch (error) {
-    console.error('AniList Service Error:', error.message);
-    return null;
-  }
-}
-
-// MangaFire endpoint with AniList integration
 app.get('/mangafire-info', async (req, res) => {
   const { id } = req.query;
 
@@ -524,15 +507,11 @@ app.get('/mangafire-info', async (req, res) => {
   try {
     const url = `https://mangafire.to/manga/${id}`;
     const { data } = await axios.get(url, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-      }
+      headers: MANGAFIRE_HEADERS
     });
 
     const mangaInfo = scrapeMangaFireInfo(data);
-    
-    // Search for AniList data using the manga title
-    const anilistData = await searchManga(mangaInfo.mangaInfo.title);
+    const anilistData = await searchAniList(mangaInfo.mangaInfo.title);
 
     res.json({
       success: true,
@@ -549,15 +528,6 @@ app.get('/mangafire-info', async (req, res) => {
   }
 });
 
-app.use(express.json());
-
-
-app.use(cors({
-  origin: ['http://localhost:3001', 'http://localhost:3000'], // Add your frontend URL
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE'],
-  allowedHeaders: ['Content-Type']
-}));
 // Start server
 app.listen(PORT, () => {
   console.log(`🚀 Manga scraper running on http://localhost:${PORT}`);
