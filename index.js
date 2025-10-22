@@ -74,7 +74,8 @@ function scrapeMangaFromHTML(html) {
   $('.featured-grid .rounded').each((i, el) => {
     const $el = $(el);
     
-    const id = $el.find('a[href^="/manga/"]').attr('href');
+    const fullPath = $el.find('a[href^="/manga/"]').attr('href');
+    const id = fullPath ? fullPath.replace('/manga/', '') : null;
     const mangaID = $el.find('a').first().attr('href');
     const chapterNumber = $el.find('.text-lg.font-black').text().trim();
     const mangaTitle = $el.find('.text-secondary').text().trim();
@@ -115,7 +116,9 @@ function scrapeChaptersPage(html) {
     const imageAlt = $el.find('img').first().attr('alt');
     
     const mangaLink = $el.find('a[href^="/manga/"]').first();
-    const id = mangaLink.attr('href');
+    const fullPath = mangaLink.attr('href');
+    // Extract just the ID portion from /manga/6511/megami-no-caf-terrace
+    const id = fullPath ? fullPath.replace('/manga/', '') : null;
     const mangaTitle = $el.find('.text-secondary').first().text().trim();
     
     const timeAgo = $el.find('time-ago').first().attr('datetime');
@@ -135,7 +138,6 @@ function scrapeChaptersPage(html) {
 
   return chaptersList;
 }
-
 function scrapeMangaDetails(html) {
   const $ = cheerio.load(html);
   
@@ -210,9 +212,12 @@ function scrapeTrendingMangas(html) {
       if (tagText) tags.push(tagText);
     });
     
+    // Extract ID by removing /manga/ prefix
+    const id = mangaLink.replace('/manga/', '');
+    
     if (title && mangaLink) {
       trendingList.push({
-        id: mangaLink,
+        id,
         title,
         alternativeTitle: (alternativeTitle && alternativeTitle.length > 0) ? alternativeTitle : null,
         imageUrl: imageUrl || null,
@@ -319,9 +324,9 @@ app.get('/', (req, res) => {
       },
       {
         method: 'GET',
-        path: '/manga-details?url=YOUR_URL',
+        path: '/manga-details?id=MANGA_ID',
         description: 'Get manga details from MangaPill with AniList data',
-        example: '/manga-details?url=https://mangapill.com/manga/9268/who-s-that-girl'
+        example: '/manga-details?id=9268/who-s-that-girl'
       },
       {
         method: 'GET',
@@ -398,16 +403,18 @@ app.get('/scrape-url', async (req, res) => {
 });
 
 app.get('/manga-details', async (req, res) => {
-  const { url } = req.query;
+  const { id } = req.query;
 
-  if (!url) {
+  if (!id) {
     return res.status(400).json({ 
-      error: 'URL parameter is required', 
-      example: '/manga-details?url=https://mangapill.com/manga/9268/who-s-that-girl' 
+      success: false,
+      error: 'Manga ID parameter is required', 
+      example: '/manga-details?id=9268/who-s-that-girl' 
     });
   }
 
   try {
+    const url = `https://mangapill.com/manga/${id}`;
     const { data } = await axios.get(url, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
@@ -533,7 +540,7 @@ app.listen(PORT, () => {
   console.log(`🚀 Manga scraper running on http://localhost:${PORT}`);
   console.log(`📋 Scrape featured manga: http://localhost:${PORT}/featured-mangas`);
   console.log(`🔗 Scrape custom URL: http://localhost:${PORT}/scrape-url?url=YOUR_URL`);
-  console.log(`📖 Scrape manga details: http://localhost:${PORT}/manga-details?url=YOUR_URL`);
+  console.log(`📖 Scrape manga details: http://localhost:${PORT}/manga-details?id=MANGA_ID`);
   console.log(`📚 Scrape latest chapters: http://localhost:${PORT}/recent-chapters`);
   console.log(`🔥 Scrape trending mangas: http://localhost:${PORT}/trending-mangas`);
   console.log(`🔥 Scrape MangaFire info: http://localhost:${PORT}/mangafire-info?id=MANGA_ID`);
