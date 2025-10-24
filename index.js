@@ -9,10 +9,10 @@ const PORT = 3000;
 
 // ==================== MIDDLEWARE (MUST BE FIRST) ====================
 app.use(cors({
-  origin: ['http://localhost:3001', 'http://localhost:3000'],
+  origin: true, // Allow all origins
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE'],
-  allowedHeaders: ['Content-Type']
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
 app.use(express.json());
