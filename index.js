@@ -3,9 +3,17 @@ const axios = require('axios');
 const cheerio = require('cheerio');
 const { request, gql } = require('graphql-request');
 const cors = require('cors');
+const archiver = require('archiver');
 
 const app = express();
 const PORT = 3000;
+
+// Function to get the proxy base URL dynamically
+function getProxyBaseUrl(req) {
+  const protocol = req.protocol;
+  const host = req.get('host');
+  return `${protocol}://${host}`;
+}
 
 // ==================== MIDDLEWARE (MUST BE FIRST) ====================
 app.use(cors({
@@ -22,11 +30,6 @@ const ANILIST_API = 'https://graphql.anilist.co';
 // Headers for different sources
 const MANGAPILL_HEADERS = {
   'Referer': 'https://mangapill.com/',
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-};
-
-const MANGAFIRE_HEADERS = {
-  'Referer': 'https://mangafire.to/',
   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
 };
 
@@ -82,6 +85,12 @@ async function searchAniList(mangaTitle) {
     console.error('Error fetching from AniList:', error);
     return null;
   }
+}
+
+// Helper function to proxy image URL
+function proxyImageUrl(imageUrl, baseUrl) {
+  if (!imageUrl) return null;
+  return `${baseUrl}/proxy?url=${encodeURIComponent(imageUrl)}`;
 }
 
 // ==================== MANGAPILL SCRAPERS ====================
@@ -259,80 +268,128 @@ function scrapeTrendingMangas(html) {
   return trendingList;
 }
 
-// ==================== MANGAFIRE SCRAPERS ====================
-
-function scrapeMangaFireInfo(html) {
+function scrapeChapterPages(html, baseUrl) {
   const $ = cheerio.load(html);
+  const pages = [];
   
-  const res = {
-    mangaInfo: {
-      title: null,
-      altTitles: null,
-      poster: null,
-      status: null,
-      type: null,
-      description: null,
-      author: null,
-      published: null,
-      genres: [],
-      rating: null,
-      chapters: []
-    },
-    relatedManga: [],
-    similarManga: []
+  // Extract chapter title
+  const chapterTitle = $('h1').text().trim();
+  
+  // Extract manga title and chapter info
+  const breadcrumb = $('.flex.items-center.space-x-1 a[href^="/manga/"]').text().trim();
+  
+  // Scrape all images
+  $('img.js-page').each((i, el) => {
+    const $el = $(el);
+    const imageUrl = $el.attr('data-src') || $el.attr('src');
+    const alt = $el.attr('alt');
+    const width = $el.attr('width');
+    const height = $el.attr('height');
+    
+    if (imageUrl) {
+      pages.push({
+        pageNumber: i + 1,
+        imageUrl: proxyImageUrl(imageUrl, baseUrl),
+        originalImageUrl: imageUrl,
+        alt: alt || null,
+        width: width || null,
+        height: height || null
+      });
+    }
+  });
+  
+  return {
+    chapterTitle,
+    mangaTitle: breadcrumb,
+    totalPages: pages.length,
+    pages
   };
-
-  try {
-    res.mangaInfo.title = $('h1[itemprop="name"]').text().trim() || null;
-    res.mangaInfo.altTitles = $('h1[itemprop="name"]').siblings('h6').text().trim() || null;
-    res.mangaInfo.poster = $('.poster img')?.attr('src')?.trim() || null;
-    res.mangaInfo.status = $('.info > p').first().text().trim() || null;
-    res.mangaInfo.type = $('.min-info a').first().text().trim() || null;
-    res.mangaInfo.description = $('.description').text().replace('Read more +', '').trim() || null;
-    res.mangaInfo.author = $('.meta div:contains("Author:") a').text().trim() || null;
-    res.mangaInfo.published = $('.meta div:contains("Published:")').text().replace('Published:', '').trim() || null;
-    res.mangaInfo.rating = $('.rating-box .live-score').text().trim() || null;
-
-    $('.meta div:contains("Genres:") a').each((i, el) => {
-      const genre = $(el).text().trim();
-      if (genre) res.mangaInfo.genres.push(genre);
-    });
-
-    $('#chapters-list a[href*="/read/"]').each((i, el) => {
-      const chapterLink = $(el).attr('href');
-      const chapterTitle = $(el).text().trim();
-      if (chapterTitle && chapterLink) {
-        res.mangaInfo.chapters.push({
-          title: chapterTitle,
-          link: chapterLink
-        });
-      }
-    });
-
-    $('section.side-manga.default-style div.original.card-sm.body a.unit').each((i, el) => {
-      const manga = {
-        id: $(el).attr('href')?.split('/').pop() || null,
-        name: $(el).find('.info h6').text().trim() || null,
-        poster: $(el).find('.poster img').attr('src')?.trim() || null
-      };
-      if (manga.id && manga.name) {
-        res.similarManga.push(manga);
-      }
-    });
-
-    return res;
-  } catch (err) {
-    console.error('Error scraping MangaFire:', err);
-    throw new Error(`Failed to scrape MangaFire: ${err.message}`);
-  }
 }
 
 // ==================== ROUTES ====================
 
+// Proxy endpoint to fetch images
+app.get('/proxy', async (req, res) => {
+  try {
+    const imageUrl = req.query.url;
+    
+    if (!imageUrl) {
+      return res.status(400).json({ error: 'URL parameter is required' });
+    }
+
+    // Validate it's from the expected CDN
+    if (!imageUrl.includes('readdetectiveconan.com') && !imageUrl.includes('mangapill.com')) {
+      return res.status(403).json({ error: 'Invalid image source' });
+    }
+
+    // Fetch the image with MangaPill-specific headers
+    const response = await axios({
+      method: 'GET',
+      url: imageUrl,
+      responseType: 'arraybuffer',
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Referer': 'https://mangapill.com/',
+        'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Sec-Ch-Ua': '"Not_A Brand";v="8", "Chromium";v="120"',
+        'Sec-Ch-Ua-Mobile': '?0',
+        'Sec-Ch-Ua-Platform': '"Windows"',
+        'Sec-Fetch-Dest': 'image',
+        'Sec-Fetch-Mode': 'no-cors',
+        'Sec-Fetch-Site': 'cross-site'
+      },
+      timeout: 15000,
+      maxRedirects: 5
+    });
+
+    // Set appropriate content type and caching
+    const contentType = response.headers['content-type'] || 'image/jpeg';
+    res.set('Content-Type', contentType);
+    res.set('Cache-Control', 'public, max-age=86400');
+    res.set('Access-Control-Allow-Origin', '*');
+    
+    // Send the image
+    res.send(response.data);
+  } catch (error) {
+    console.error('Error fetching image:', error.message);
+    
+    if (error.response) {
+      res.status(error.response.status).json({ 
+        error: 'Failed to fetch image',
+        status: error.response.status,
+        details: error.message 
+      });
+    } else {
+      res.status(500).json({ 
+        error: 'Failed to fetch image',
+        details: error.message 
+      });
+    }
+  }
+});
+
+// Health check endpoint
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', service: 'Manga Scraper API with Image Proxy' });
+});
+
 app.get('/', (req, res) => {
   res.json({
-    message: 'Manga Scraper API with AniList Integration',
+    message: 'Manga Scraper API with AniList Integration & Image Proxy',
     endpoints: [
+      {
+        method: 'GET',
+        path: '/proxy?url=IMAGE_URL',
+        description: 'Proxy manga images to bypass CORS',
+        example: '/proxy?url=https://cdn.readdetectiveconan.com/file/mangap/...'
+      },
+      {
+        method: 'GET',
+        path: '/health',
+        description: 'Health check endpoint'
+      },
       {
         method: 'GET',
         path: '/featured-mangas',
@@ -352,6 +409,18 @@ app.get('/', (req, res) => {
       },
       {
         method: 'GET',
+        path: '/chapter-pages?mangaID=MANGA_ID',
+        description: 'Get all pages/images from a manga chapter',
+        example: '/chapter-pages?mangaID=2-11163000/one-piece-chapter-1163'
+      },
+      {
+        method: 'GET',
+        path: '/download-chapter-pages?mangaID=MANGA_ID',
+        description: 'Download all chapter pages to a folder on the server',
+        example: '/download-chapter-pages?mangaID=2-11163000/one-piece-chapter-1163'
+      },
+      {
+        method: 'GET',
         path: '/recent-chapters',
         description: 'Scrape latest chapters from MangaPill chapters page'
       },
@@ -359,12 +428,6 @@ app.get('/', (req, res) => {
         method: 'GET',
         path: '/trending-mangas',
         description: 'Scrape trending mangas from MangaPill'
-      },
-      {
-        method: 'GET',
-        path: '/mangafire-info?id=MANGA_ID',
-        description: 'Get manga details from MangaFire',
-        example: '/mangafire-info?id=the-fragrant-flower-blooms-with-dignityy.zlw6m'
       }
     ]
   });
@@ -453,6 +516,165 @@ app.get('/manga-details', async (req, res) => {
   }
 });
 
+app.get('/chapter-pages', async (req, res) => {
+  const { mangaID } = req.query;
+
+  if (!mangaID) {
+    return res.status(400).json({ 
+      success: false,
+      error: 'mangaID parameter is required', 
+      example: '/chapter-pages?mangaID=2-11163000/one-piece-chapter-1163'
+    });
+  }
+
+  try {
+    const url = `https://mangapill.com/chapters/${mangaID}`;
+    const { data } = await axios.get(url, {
+      headers: MANGAPILL_HEADERS
+    });
+
+    const baseUrl = getProxyBaseUrl(req);
+    const chapterData = scrapeChapterPages(data, baseUrl);
+    
+    res.json({
+      success: true,
+      url: url,
+      data: chapterData
+    });
+  } catch (err) {
+    res.status(500).json({
+      success: false,
+      error: err.message
+    });
+  }
+});
+
+app.get('/download-chapter-pages', async (req, res) => {
+  const { mangaID } = req.query;
+
+  if (!mangaID) {
+    return res.status(400).json({ 
+      success: false,
+      error: 'mangaID parameter is required', 
+      example: '/download-chapter-pages?mangaID=2-11163000/one-piece-chapter-1163'
+    });
+  }
+
+  try {
+    // Scrape chapter pages first
+    const url = `https://mangapill.com/chapters/${mangaID}`;
+    const { data } = await axios.get(url, {
+      headers: MANGAPILL_HEADERS
+    });
+
+    const baseUrl = getProxyBaseUrl(req);
+    const chapterData = scrapeChapterPages(data, baseUrl);
+    
+    if (chapterData.pages.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'No pages found for this chapter'
+      });
+    }
+
+    // Sanitize filename for ZIP
+    const sanitizedTitle = (chapterData.chapterTitle || 'chapter')
+      .replace(/[^a-z0-9]/gi, '_')
+      .toLowerCase();
+    const zipFilename = `${sanitizedTitle}.zip`;
+
+    // Set response headers for ZIP download
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="${zipFilename}"`);
+    res.setHeader('Access-Control-Allow-Origin', '*');
+
+    // Create archiver instance
+    const archive = archiver('zip', {
+      zlib: { level: 9 } // Maximum compression
+    });
+
+    // Handle errors
+    archive.on('error', (err) => {
+      console.error('Archive error:', err);
+      if (!res.headersSent) {
+        res.status(500).json({ success: false, error: err.message });
+      }
+    });
+
+    // Pipe archive to response
+    archive.pipe(res);
+
+    // Download and add each image to the archive
+    let successCount = 0;
+    let errorCount = 0;
+
+    console.log(`\n📦 Creating ZIP: ${zipFilename}`);
+    console.log(`📄 Total pages to download: ${chapterData.pages.length}\n`);
+
+    for (const page of chapterData.pages) {
+      try {
+        const imageUrl = page.originalImageUrl;
+        console.log(`⏳ Downloading page ${page.pageNumber}...`);
+        
+        const imageResponse = await axios({
+          method: 'GET',
+          url: imageUrl,
+          responseType: 'arraybuffer',
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Referer': 'https://mangapill.com/',
+            'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8'
+          },
+          timeout: 30000
+        });
+
+        // Extract file extension
+        const extension = imageUrl.match(/\.(jpg|jpeg|png|webp|gif)$/i)?.[1] || 'jpg';
+        const paddedPageNumber = String(page.pageNumber).padStart(3, '0');
+        const filename = `page_${paddedPageNumber}.${extension}`;
+
+        // Add image buffer to archive
+        archive.append(Buffer.from(imageResponse.data), { name: filename });
+        successCount++;
+        console.log(`✓ Added ${filename}`);
+        
+      } catch (imgError) {
+        errorCount++;
+        console.error(`✗ Failed page ${page.pageNumber}:`, imgError.message);
+      }
+    }
+
+    // Add README file
+    const readme = `Chapter: ${chapterData.chapterTitle}
+Manga: ${chapterData.mangaTitle}
+Total Pages: ${chapterData.totalPages}
+Successfully Downloaded: ${successCount}
+Failed: ${errorCount}
+
+Downloaded from: ${url}
+Generated by: Manga Scraper API
+Date: ${new Date().toISOString()}
+`;
+    archive.append(readme, { name: 'README.txt' });
+
+    // Finalize archive
+    await archive.finalize();
+
+    console.log(`\n✅ ZIP completed: ${zipFilename}`);
+    console.log(`✓ Success: ${successCount} pages`);
+    console.log(`✗ Failed: ${errorCount} pages\n`);
+
+  } catch (err) {
+    console.error('Error creating ZIP:', err);
+    if (!res.headersSent) {
+      res.status(500).json({
+        success: false,
+        error: err.message
+      });
+    }
+  }
+});
+
 app.get('/recent-chapters', async (req, res) => {
   try {
     const { data } = await axios.get('https://mangapill.com/chapters', {
@@ -493,50 +715,20 @@ app.get('/trending-mangas', async (req, res) => {
   }
 });
 
-app.get('/mangafire-info', async (req, res) => {
-  const { id } = req.query;
-
-  if (!id) {
-    return res.status(400).json({ 
-      success: false,
-      error: 'Manga ID parameter is required', 
-      example: '/mangafire-info?id=the-fragrant-flower-blooms-with-dignityy.zlw6m' 
-    });
-  }
-
-  try {
-    const url = `https://mangafire.to/manga/${id}`;
-    const { data } = await axios.get(url, {
-      headers: MANGAFIRE_HEADERS
-    });
-
-    const mangaInfo = scrapeMangaFireInfo(data);
-    const anilistData = await searchAniList(mangaInfo.mangaInfo.title);
-
-    res.json({
-      success: true,
-      source: 'MangaFire',
-      url: url,
-      mangafire: mangaInfo,
-      anilist: anilistData
-    });
-  } catch (err) {
-    res.status(500).json({
-      success: false,
-      error: err.message
-    });
-  }
-});
-
 // Start server
 app.listen(PORT, () => {
-  console.log(`🚀 Manga scraper running on http://localhost:${PORT}`);
-  console.log(`📋 Scrape featured manga: http://localhost:${PORT}/featured-mangas`);
-  console.log(`🔗 Scrape custom URL: http://localhost:${PORT}/scrape-url?url=YOUR_URL`);
-  console.log(`📖 Scrape manga details: http://localhost:${PORT}/manga-details?id=MANGA_ID`);
-  console.log(`📚 Scrape latest chapters: http://localhost:${PORT}/recent-chapters`);
-  console.log(`🔥 Scrape trending mangas: http://localhost:${PORT}/trending-mangas`);
-  console.log(`🔥 Scrape MangaFire info: http://localhost:${PORT}/mangafire-info?id=MANGA_ID`);
+  console.log(`\n🚀 Manga Scraper API with Image Proxy running!`);
+  console.log(`📍 URL: http://localhost:${PORT}`);
+  console.log(`✅ Health: http://localhost:${PORT}/health`);
+  console.log(`🖼️  Image Proxy: http://localhost:${PORT}/proxy?url=IMAGE_URL`);
+  console.log(`\n📚 API Endpoints:`);
+  console.log(`📋 Featured manga: http://localhost:${PORT}/featured-mangas`);
+  console.log(`🔗 Custom URL: http://localhost:${PORT}/scrape-url?url=YOUR_URL`);
+  console.log(`📖 Manga details: http://localhost:${PORT}/manga-details?id=MANGA_ID`);
+  console.log(`📄 Chapter pages: http://localhost:${PORT}/chapter-pages?mangaID=MANGA_ID`);
+  console.log(`📦 Download chapter: http://localhost:${PORT}/download-chapter-pages?mangaID=MANGA_ID`);
+  console.log(`📚 Latest chapters: http://localhost:${PORT}/recent-chapters`);
+  console.log(`🔥 Trending mangas: http://localhost:${PORT}/trending-mangas\n`);
 });
 
 module.exports = app;
