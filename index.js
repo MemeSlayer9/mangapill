@@ -15,12 +15,28 @@ function getProxyBaseUrl(req) {
   return `${protocol}://${host}`;
 }
 
-// ==================== MIDDLEWARE (MUST BE FIRST) ====================
+// ==================== UNRESTRICTED CORS - ALLOW ALL ORIGINS ====================
+// This must be FIRST before any other middleware or routes
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+  res.header('Access-Control-Max-Age', '86400'); // Cache preflight for 24 hours
+  
+  // Handle preflight requests
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
+  
+  next();
+});
+
+// Backup CORS middleware
 app.use(cors({
-  origin: true, // Allow all origins
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  origin: '*',
+  credentials: false,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+  allowedHeaders: ['Origin', 'X-Requested-With', 'Content-Type', 'Accept', 'Authorization']
 }));
 
 app.use(express.json());
@@ -409,6 +425,12 @@ app.get('/', (req, res) => {
       },
       {
         method: 'GET',
+        path: '/get-chapters-list?id=MANGA_ID',
+        description: 'Get list of all available chapters for a manga',
+        example: '/get-chapters-list?id=2/one-piece'
+      },
+      {
+        method: 'GET',
         path: '/chapter-pages?mangaID=MANGA_ID',
         description: 'Get all pages/images from a manga chapter',
         example: '/chapter-pages?mangaID=2-11163000/one-piece-chapter-1163'
@@ -418,6 +440,12 @@ app.get('/', (req, res) => {
         path: '/download-chapter-pages?mangaID=MANGA_ID',
         description: 'Download all chapter pages to a folder on the server',
         example: '/download-chapter-pages?mangaID=2-11163000/one-piece-chapter-1163'
+      },
+      {
+        method: 'GET',
+        path: '/download-multiple-chapters?chapterIds=ID1,ID2,ID3&folderName=FOLDER_NAME',
+        description: 'Download multiple chapters as a single ZIP file with organized folders',
+        example: '/download-multiple-chapters?chapterIds=2-11163000/one-piece-chapter-1163,2-11162000/one-piece-chapter-1162&folderName=One_Piece'
       },
       {
         method: 'GET',
@@ -507,6 +535,47 @@ app.get('/manga-details', async (req, res) => {
       url: url,
       mangaPill: mangaDetails,
       anilist: anilistData
+    });
+  } catch (err) {
+    res.status(500).json({
+      success: false,
+      error: err.message
+    });
+  }
+});
+
+// ==================== NEW: GET AVAILABLE CHAPTERS FOR A MANGA ====================
+app.get('/get-chapters-list', async (req, res) => {
+  const { id } = req.query;
+
+  if (!id) {
+    return res.status(400).json({ 
+      success: false,
+      error: 'Manga ID parameter is required', 
+      example: '/get-chapters-list?id=2/one-piece' 
+    });
+  }
+
+  try {
+    const url = `https://mangapill.com/manga/${id}`;
+    const { data } = await axios.get(url, {
+      headers: MANGAPILL_HEADERS
+    });
+
+    const mangaDetails = scrapeMangaDetails(data);
+    
+    // Extract chapter IDs from links
+    const chapterIds = mangaDetails.chapters.map(ch => {
+      return ch.link.replace('/chapters/', '');
+    });
+
+    res.json({
+      success: true,
+      mangaTitle: mangaDetails.title,
+      totalChapters: mangaDetails.totalChapters,
+      chapters: mangaDetails.chapters,
+      chapterIds: chapterIds,
+      downloadMultipleExample: `/download-multiple-chapters?chapterIds=${chapterIds.slice(0, 3).join(',')}&folderName=${mangaDetails.title.replace(/[^a-z0-9]/gi, '_')}`
     });
   } catch (err) {
     res.status(500).json({
@@ -608,13 +677,9 @@ app.get('/download-chapter-pages', async (req, res) => {
     let successCount = 0;
     let errorCount = 0;
 
-    console.log(`\n📦 Creating ZIP: ${zipFilename}`);
-    console.log(`📄 Total pages to download: ${chapterData.pages.length}\n`);
-
     for (const page of chapterData.pages) {
       try {
         const imageUrl = page.originalImageUrl;
-        console.log(`⏳ Downloading page ${page.pageNumber}...`);
         
         const imageResponse = await axios({
           method: 'GET',
@@ -636,22 +701,246 @@ app.get('/download-chapter-pages', async (req, res) => {
         // Add image buffer to archive
         archive.append(Buffer.from(imageResponse.data), { name: filename });
         successCount++;
-        console.log(`✓ Added ${filename}`);
         
       } catch (imgError) {
         errorCount++;
-        console.error(`✗ Failed page ${page.pageNumber}:`, imgError.message);
       }
     }
 
-    // Add README file
-    const readme = `Chapter: ${chapterData.chapterTitle}
-Manga: ${chapterData.mangaTitle}
-Total Pages: ${chapterData.totalPages}
-Successfully Downloaded: ${successCount}
-Failed: ${errorCount}
+    // Finalize archive
+    await archive.finalize();
 
-Downloaded from: ${url}
+  } catch (err) {
+    console.error('Error creating ZIP:', err);
+    if (!res.headersSent) {
+      res.status(500).json({
+        success: false,
+        error: err.message
+      });
+    }
+  }
+});
+
+// ==================== DOWNLOAD MULTIPLE CHAPTERS ====================
+app.get('/download-multiple-chapters', async (req, res) => {
+  const { chapterIds, folderName } = req.query;
+
+  if (!chapterIds) {
+    return res.status(400).json({ 
+      success: false,
+      error: 'chapterIds parameter is required (comma-separated)', 
+      example: '/download-multiple-chapters?chapterIds=2-11163000/one-piece-chapter-1163,2-11162000/one-piece-chapter-1162&folderName=One_Piece'
+    });
+  }
+
+  try {
+    // Parse comma-separated chapter IDs - handle URL encoding properly
+    const decodedIds = decodeURIComponent(chapterIds);
+    const chapters = decodedIds.split(',').map(id => id.trim()).filter(id => id);
+    
+    console.log('📥 Received chapter IDs:', chapterIds);
+    console.log('📥 Decoded chapter IDs:', decodedIds);
+    console.log('📥 Parsed chapters array:', chapters);
+    console.log('📥 Total chapters to process:', chapters.length);
+    
+    if (chapters.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'No valid chapter IDs provided'
+      });
+    }
+
+    // Sanitize folder name
+    const sanitizedFolderName = (folderName || 'manga_chapters')
+      .replace(/[^a-z0-9\s-_]/gi, '_')
+      .replace(/\s+/g, '_');
+    
+    const zipFilename = `${sanitizedFolderName}.zip`;
+
+    console.log(`\n📦 Creating multi-chapter ZIP: ${zipFilename}`);
+    console.log(`📚 Total chapters to download: ${chapters.length}\n`);
+
+    // Set response headers for ZIP download
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="${zipFilename}"`);
+    res.setHeader('Access-Control-Allow-Origin', '*');
+
+    // Create archiver instance
+    const archive = archiver('zip', {
+      zlib: { level: 9 } // Maximum compression
+    });
+
+    // Handle errors
+    archive.on('error', (err) => {
+      console.error('Archive error:', err);
+      if (!res.headersSent) {
+        res.status(500).json({ success: false, error: err.message });
+      }
+    });
+
+    // Pipe archive to response
+    archive.pipe(res);
+
+    let totalSuccess = 0;
+    let totalFailed = 0;
+    const chapterSummary = [];
+
+    // Process each chapter
+    for (let chapterIndex = 0; chapterIndex < chapters.length; chapterIndex++) {
+      const mangaID = chapters[chapterIndex];
+      
+      try {
+        console.log(`\n${'='.repeat(60)}`);
+        console.log(`📖 Processing chapter ${chapterIndex + 1}/${chapters.length}`);
+        console.log(`🆔 Chapter ID: ${mangaID}`);
+        console.log(`${'='.repeat(60)}`);
+        
+        // Scrape chapter pages
+        const url = `https://mangapill.com/chapters/${mangaID}`;
+        console.log(`🌐 Fetching URL: ${url}`);
+        
+        const { data } = await axios.get(url, {
+          headers: MANGAPILL_HEADERS,
+          timeout: 30000
+        });
+
+        const baseUrl = getProxyBaseUrl(req);
+        const chapterData = scrapeChapterPages(data, baseUrl);
+        
+        console.log(`📄 Pages found: ${chapterData.pages.length}`);
+        console.log(`📖 Chapter title: ${chapterData.chapterTitle}`);
+        
+        if (chapterData.pages.length === 0) {
+          console.log(`⚠️  No pages found for chapter: ${mangaID}`);
+          totalFailed++;
+          chapterSummary.push({
+            chapter: mangaID,
+            status: 'failed',
+            reason: 'No pages found'
+          });
+          continue;
+        }
+
+        // Extract chapter number from the chapter title or ID
+        let chapterNumber = 'Unknown';
+        
+        // Try to extract chapter number from the title (e.g., "One Piece Chapter 1163")
+        const chapterMatch = chapterData.chapterTitle.match(/chapter[\s-]*(\d+)/i);
+        if (chapterMatch) {
+          chapterNumber = chapterMatch[1];
+        } else {
+          // Fallback: try to extract from mangaID (e.g., "2-11163000/one-piece-chapter-1163")
+          const idMatch = mangaID.match(/chapter[\s-]*(\d+)/i);
+          if (idMatch) {
+            chapterNumber = idMatch[1];
+          } else {
+            // Last resort: use the numeric part from ID
+            const numMatch = mangaID.match(/(\d+)/);
+            if (numMatch) {
+              chapterNumber = numMatch[1];
+            }
+          }
+        }
+        
+        // Get manga title from chapter data
+        const mangaTitle = chapterData.mangaTitle || 'Manga';
+        const sanitizedMangaTitle = mangaTitle.replace(/[^a-z0-9\s-]/gi, '_').replace(/\s+/g, '_');
+        
+        const chapterFolderName = `${sanitizedMangaTitle}_Chapter_${chapterNumber}`;
+        
+        console.log(`📁 Creating folder: ${chapterFolderName}`);
+        
+        let chapterSuccessCount = 0;
+        let chapterFailCount = 0;
+
+        // Download each page in the chapter
+        for (const page of chapterData.pages) {
+          try {
+            const imageUrl = page.originalImageUrl;
+            console.log(`  ⏳ Downloading page ${page.pageNumber}/${chapterData.pages.length}...`);
+            
+            const imageResponse = await axios({
+              method: 'GET',
+              url: imageUrl,
+              responseType: 'arraybuffer',
+              headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Referer': 'https://mangapill.com/',
+                'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8'
+              },
+              timeout: 30000
+            });
+
+            // Extract file extension
+            const extension = imageUrl.match(/\.(jpg|jpeg|png|webp|gif)$/i)?.[1] || 'jpg';
+            const paddedPageNumber = String(page.pageNumber).padStart(3, '0');
+            const filename = `${chapterFolderName}/page_${paddedPageNumber}.${extension}`;
+
+            // Add image to archive in chapter-specific folder
+            archive.append(Buffer.from(imageResponse.data), { name: filename });
+            chapterSuccessCount++;
+            console.log(`  ✓ Added ${filename}`);
+            
+          } catch (imgError) {
+            chapterFailCount++;
+            console.error(`  ✗ Failed page ${page.pageNumber}:`, imgError.message);
+          }
+        }
+
+        // Add chapter info file
+        const chapterInfo = `Chapter: ${chapterData.chapterTitle}
+Manga: ${chapterData.mangaTitle}
+Chapter ID: ${mangaID}
+Total Pages: ${chapterData.totalPages}
+Successfully Downloaded: ${chapterSuccessCount}
+Failed: ${chapterFailCount}
+Source URL: ${url}
+`;
+        archive.append(chapterInfo, { name: `${chapterFolderName}/info.txt` });
+
+        totalSuccess += chapterSuccessCount;
+        totalFailed += chapterFailCount;
+        
+        chapterSummary.push({
+          chapter: mangaID,
+          title: chapterData.chapterTitle,
+          status: 'success',
+          pagesDownloaded: chapterSuccessCount,
+          pagesFailed: chapterFailCount
+        });
+
+        console.log(`  ✓ Chapter complete: ${chapterSuccessCount} pages downloaded, ${chapterFailCount} failed`);
+        
+      } catch (chapterError) {
+        console.error(`✗ Failed to process chapter ${mangaID}:`, chapterError.message);
+        totalFailed++;
+        chapterSummary.push({
+          chapter: mangaID,
+          status: 'failed',
+          reason: chapterError.message
+        });
+      }
+    }
+
+    // Add overall README file
+    const readme = `Multi-Chapter Download Summary
+================================
+
+Folder Name: ${sanitizedFolderName}
+Total Chapters Requested: ${chapters.length}
+Total Pages Downloaded: ${totalSuccess}
+Total Pages Failed: ${totalFailed}
+
+Chapter Details:
+${chapterSummary.map((ch, idx) => `
+${idx + 1}. ${ch.chapter}
+   Status: ${ch.status}
+   ${ch.title ? `Title: ${ch.title}` : ''}
+   ${ch.pagesDownloaded !== undefined ? `Pages Downloaded: ${ch.pagesDownloaded}` : ''}
+   ${ch.pagesFailed !== undefined ? `Pages Failed: ${ch.pagesFailed}` : ''}
+   ${ch.reason ? `Reason: ${ch.reason}` : ''}
+`).join('\n')}
+
 Generated by: Manga Scraper API
 Date: ${new Date().toISOString()}
 `;
@@ -660,12 +949,13 @@ Date: ${new Date().toISOString()}
     // Finalize archive
     await archive.finalize();
 
-    console.log(`\n✅ ZIP completed: ${zipFilename}`);
-    console.log(`✓ Success: ${successCount} pages`);
-    console.log(`✗ Failed: ${errorCount} pages\n`);
+    console.log(`\n✅ Multi-chapter ZIP completed: ${zipFilename}`);
+    console.log(`📚 Chapters processed: ${chapters.length}`);
+    console.log(`✓ Total pages downloaded: ${totalSuccess}`);
+    console.log(`✗ Total pages failed: ${totalFailed}\n`);
 
   } catch (err) {
-    console.error('Error creating ZIP:', err);
+    console.error('Error creating multi-chapter ZIP:', err);
     if (!res.headersSent) {
       res.status(500).json({
         success: false,
@@ -721,12 +1011,15 @@ app.listen(PORT, () => {
   console.log(`📍 URL: http://localhost:${PORT}`);
   console.log(`✅ Health: http://localhost:${PORT}/health`);
   console.log(`🖼️  Image Proxy: http://localhost:${PORT}/proxy?url=IMAGE_URL`);
+  console.log(`🌐 CORS: UNRESTRICTED - All origins allowed`);
   console.log(`\n📚 API Endpoints:`);
   console.log(`📋 Featured manga: http://localhost:${PORT}/featured-mangas`);
   console.log(`🔗 Custom URL: http://localhost:${PORT}/scrape-url?url=YOUR_URL`);
   console.log(`📖 Manga details: http://localhost:${PORT}/manga-details?id=MANGA_ID`);
+  console.log(`📋 Get chapters list: http://localhost:${PORT}/get-chapters-list?id=MANGA_ID`);
   console.log(`📄 Chapter pages: http://localhost:${PORT}/chapter-pages?mangaID=MANGA_ID`);
   console.log(`📦 Download chapter: http://localhost:${PORT}/download-chapter-pages?mangaID=MANGA_ID`);
+  console.log(`📦 Download multiple: http://localhost:${PORT}/download-multiple-chapters?chapterIds=ID1,ID2&folderName=NAME`);
   console.log(`📚 Latest chapters: http://localhost:${PORT}/recent-chapters`);
   console.log(`🔥 Trending mangas: http://localhost:${PORT}/trending-mangas\n`);
 });
